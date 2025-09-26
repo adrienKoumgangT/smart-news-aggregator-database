@@ -1,0 +1,32 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+    metrics_path: /scrape
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'redis-master'
+
+  - job_name: 'redis-sentinel'
+    static_configs:
+      - targets: ['redis-sentinel1:26379', 'redis-sentinel2:26379', 'redis-sentinel3:26379']
+    metrics_path: /metrics
+
+  - job_name: 'mongodb'
+    static_configs:
+      - targets: ['mongodb-exporter:9216']
+    metrics_path: /metrics
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'mongodb-primary'
+
+  - job_name: 'api'
+    static_configs:
+      - targets: ['smart-news-aggregator-api:8080']
+

@@ -1,0 +1,257 @@
+services:
+
+  # Redis Master with Replica
+  redis-master:
+    image: redis:alpine
+    command: redis-server --appendonly yes --save 60 1 --loglevel warning
+    ports:
+      - "6379:6379"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    volumes:
+      - redis_master_data:/data
+      - redis_backup:/backup
+    restart: unless-stopped
+    networks:
+      - smartnet
+
+  redis-replica:
+    image: redis:alpine
+    command: redis-server --appendonly yes --replicaof redis-master 6379
+    ports:
+      - "6380:6379"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    volumes:
+      - redis_replica_data:/data
+    depends_on:
+      - redis-master
+    restart: unless-stopped
+    networks:
+      - smartnet
+
+  # Redis Sentinel
+  redis-sentinel1:
+    image: redis:alpine
+    command: redis-sentinel /etc/redis/sentinel.conf
+    volumes:
+      - ./redis-sentinel.conf:/etc/redis/sentinel.conf:ro
+      - sentinel1_data:/data
+    ports:
+      - "26379:26379"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    depends_on:
+      - redis-master
+      - redis-replica
+    restart: unless-stopped
+    networks:
+      - smartnet
+
+  redis-sentinel2:
+    image: redis:alpine
+    command: redis-sentinel /etc/redis/sentinel.conf
+    volumes:
+      - ./redis-sentinel.conf:/etc/redis/sentinel.conf:ro
+      - sentinel2_data:/data
+    ports:
+      - "26380:26379"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    depends_on:
+      - redis-master
+      - redis-replica
+    restart: unless-stopped
+    networks:
+      - smartnet
+
+  redis-sentinel3:
+    image: redis:alpine
+    command: redis-sentinel /etc/redis/sentinel.conf
+    volumes:
+      - ./redis-sentinel.conf:/etc/redis/sentinel.conf:ro
+      - sentinel3_data:/data
+    ports:
+      - "26381:26379"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    depends_on:
+      - redis-master
+      - redis-replica
+    restart: unless-stopped
+    networks:
+      - smartnet
+
+  redis-exporter:
+    image: oliver006/redis_exporter
+    ports:
+      - "9121:9121"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    environment:
+      REDIS_ADDR: "redis://redis-master:6379"
+      REDIS_ALIAS: "redis-master"
+    depends_on:
+      - redis-master
+    networks:
+      - smartnet
+
+  # MongoDB Replica Set
+  mongodb-primary:
+    image: mongo:latest
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        mongod --fork --logpath /var/log/mongod.log --replSet rs0 --bind_ip_all
+        /mongo_scripts/init-and-restore.sh || true
+        echo ">> Reconfiguring replica set to use Docker network names..."
+        mongosh --quiet <<'EOF'
+        try {
+          let needsInit = false;
+          try { rs.conf(); } catch (e) { needsInit = true; }
+          if (needsInit) {
+            print(">> rs.initiate()");
+            rs.initiate({
+              _id: "rs0",
+              members: [
+                { _id: 0, host: "mongodb-primary:27017", priority: 2 },
+                { _id: 1, host: "mongodb-secondary:27017", priority: 1 },
+                { _id: 2, host: "mongodb-arbiter:27017", arbiterOnly: true }
+              ]
+            });
+          } else {
+            print(">> rs.reconfig()");
+            const cfg = rs.conf();
+            cfg.members[0].host = "mongodb-primary:27017";
+            cfg.members[1].host = "mongodb-secondary:27017";
+            cfg.members[2].host = "mongodb-arbiter:27017";
+            rs.reconfig(cfg, { force: true });
+          }
+        } catch (e) {
+          print(">> Reconfig skipped/failed:");
+          print(e);
+        }
+        EOF
+        mongod --shutdown
+        exec mongod --replSet rs0 --bind_ip_all
+    ports:
+      - "27017:27017"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    # extra_hosts:
+      # - "host.docker.internal:host-gateway"
+    volumes:
+      - mongodb_primary_data:/data/db
+      - ./mongodb_backup:/backup
+      - ./mongo_scripts:/mongo_scripts
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - smartnet
+
+  mongodb-secondary:
+    image: mongo:latest
+    command: mongod --replSet rs0 --bind_ip_all
+    ports:
+      - "27018:27017"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    # extra_hosts:
+      # - "host.docker.internal:host-gateway"
+    volumes:
+      - mongodb_secondary_data:/data/db
+    depends_on:
+      - mongodb-primary
+    restart: unless-stopped
+    networks:
+      - smartnet
+
+  mongodb-arbiter:
+    image: mongo:latest
+    command: mongod --replSet rs0 --bind_ip_all
+    ports:
+      - "27019:27017"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # depends_on:
+      # - mongodb-primary
+    restart: unless-stopped
+    networks:
+      - smartnet
+
+  mongodb-exporter:
+    image: bitnami/mongodb-exporter:0.40.0
+    ports:
+      - "9216:9216"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    environment:
+      MONGODB_URI: "mongodb://mongodb-primary:27017"
+    depends_on:
+      - mongodb-primary
+    networks:
+      - smartnet
+
+  # Monitoring Stack
+  prometheus:
+    image: prom/prometheus
+    ports:
+      - "9090:9090"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    depends_on:
+      - redis-exporter
+      - mongodb-exporter
+    networks:
+      - smartnet
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - smartnet
+
+volumes:
+  redis_master_data:
+  redis_replica_data:
+  redis_backup:
+  mongodb_primary_data:
+  mongodb_secondary_data:
+  mongodb_backup:
+  grafana_data:
+  sentinel1_data:
+  sentinel2_data:
+  sentinel3_data:
+
+networks:
+  smartnet:
+    driver: bridge
